@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hand Gesture 3D Cube</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            background: #222;
+            color: white;
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .main-container {
+            display: flex;
+            gap: 20px;
+            align-items: flex-start;
+        }
+        .video-container {
+            position: relative;
+        }
+        #canvas {
+            border: 2px solid #00ff00;
+            background: #000;
+        }
+        .cube-container {
+            position: relative;
+            border: 2px solid #ff00ff;
+            background: #111;
+            border-radius: 10px;
+            overflow: hidden;
+            min-width: 400px;
+            min-height: 400px;
+        }
+        #cubeCanvas {
+            display: block;
+            width: 400px;
+            height: 400px;
+        }
+        .info {
+            margin: 10px 0;
+            padding: 10px;
+            background: #333;
+            border-radius: 5px;
+            text-align: center;
+        }
+        .gesture-info {
+            margin: 10px 0;
+            padding: 15px;
+            background: #444;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+        button {
+            padding: 10px 20px;
+            margin: 5px;
+            background: #00ff00;
+            color: #000;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        button:hover {
+            background: #00cc00;
+        }
+        button:disabled {
+            background: #666;
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+<body>
+    <h1>Hand Gesture 3D Cube Control</h1>
+    
+    <div class="info">
+        <div id="status">Loading MediaPipe...</div>
+        <div id="handInfo">Hands: 0</div>
+    </div>
+    
+    <div>
+        <button id="startBtn" onclick="startCamera()" disabled>Start Camera</button>
+        <button id="stopBtn" onclick="stopCamera()" disabled>Stop Camera</button>
+    </div>
+    
+    <div class="main-container">
+        <div class="video-container">
+            <canvas id="canvas" width="640" height="480"></canvas>
+        </div>
+        
+        <div class="cube-container">
+            <canvas id="cubeCanvas" width="400" height="400"></canvas>
+            <div class="gesture-info">
+                <strong>Gestures:</strong><br>
+                • Index finger: Swipe to rotate<br>
+&nbsp;&nbsp;- Swipe left/right: Rotate Y<br>
+&nbsp;&nbsp;- Swipe up/down: Rotate X<br>
+                • Fist: Stop rotation<br>
+                • Two-hand pinch: Scale mode<br>
+&nbsp;&nbsp;- Move hands apart: Expand<br>
+&nbsp;&nbsp;- Move hands together: Shrink
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const cubeCanvas = document.getElementById('cubeCanvas');
+        const statusEl = document.getElementById('status');
+        const handInfoEl = document.getElementById('handInfo');
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+
+        let videoElement = null;
+        let hands = null;
+        let camera = null;
+        let isRunning = false;
+
+        // Three.js setup
+        let scene, renderer, cube, threeCamera;
+        let targetRotationX = 0;
+        let targetRotationY = 0;
+        let currentRotationX = 0;
+        let currentRotationY = 0;
+        let targetScale = 1;
+        let currentScale = 1;
+        
+        // Two-hand scaling tracking
+        let previousHandDistance = null;
+        let bothHandsPinching = false;
+        
+        // Hand rotation tracking
+        let handRotationMode = false;
+        let previousHandPosition = null;  // For swipe tracking
+        let rotationVelocityX = 0;         // Rotational velocity
+        let rotationVelocityY = 0;
+
+        function initThreeJS() {
+            try {
+                scene = new THREE.Scene();
+                scene.background = new THREE.Color(0x111111);
+
+                threeCamera = new THREE.PerspectiveCamera(75, 400 / 400, 0.1, 1000);
+                threeCamera.position.z = 3;
+
+                renderer = new THREE.WebGLRenderer({ canvas: cubeCanvas, antialias: true });
+                renderer.setSize(400, 400);
+
+                // Create cube with different colored faces
+                const geometry = new THREE.BoxGeometry(1.5, 1.5, 1.5);
+                const materials = [
+                    new THREE.MeshBasicMaterial({ color: 0xff0000 }), // Right
+                    new THREE.MeshBasicMaterial({ color: 0x00ff00 }), // Left
+                    new THREE.MeshBasicMaterial({ color: 0x0000ff }), // Top
+                    new THREE.MeshBasicMaterial({ color: 0xffff00 }), // Bottom
+                    new THREE.MeshBasicMaterial({ color: 0x00ffff }), // Front
+                    new THREE.MeshBasicMaterial({ color: 0xff00ff })  // Back
+                ];
+                
+                cube = new THREE.Mesh(geometry, materials);
+                scene.add(cube);
+
+                // Add wireframe
+                const wireframe = new THREE.WireframeGeometry(geometry);
+                const line = new THREE.LineSegments(wireframe);
+                line.material.depthTest = false;
+                line.material.opacity = 0.5;
+                line.material.transparent = true;
+                line.material.color = new THREE.Color(0xffffff);
+                cube.add(line);
+
+                // Add edges
+                const edges = new THREE.EdgesGeometry(geometry);
+                const edgeLines = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0xffffff, linewidth: 2 }));
+                cube.add(edgeLines);
+
+                // Add some ambient light
+                const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+                scene.add(ambientLight);
+
+                // Add directional light
+                const directionalLight = new THREE.DirectionalLight(0xffffff, 0.5);
+                directionalLight.position.set(1, 1, 1);
+                scene.add(directionalLight);
+
+                console.log('Three.js initialized successfully');
+                animate();
+            } catch (error) {
+                console.error('Three.js initialization error:', error);
+                statusEl.textContent = 'Three.js Error: ' + error.message;
+            }
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            // Only rotate when actively swiping
+            if (handRotationMode) {
+                currentRotationX += rotationVelocityX;
+                currentRotationY += rotationVelocityY;
+                
+                // Reset velocity after applying (no momentum)
+                rotationVelocityX = 0;
+                rotationVelocityY = 0;
+            }
+            
+            cube.rotation.x = currentRotationX;
+            cube.rotation.y = currentRotationY;
+
+            // Smooth scaling
+            currentScale += (targetScale - currentScale) * 0.1;
+            cube.scale.set(currentScale, currentScale, currentScale);
+
+            renderer.render(scene, threeCamera);
+        }
+
+        // Hand landmark connections for skeleton
+        const HAND_CONNECTIONS = [
+            [0, 1], [1, 2], [2, 3], [3, 4],           // Thumb
+            [0, 5], [5, 6], [6, 7], [7, 8],           // Index finger
+            [0, 9], [9, 10], [10, 11], [11, 12],      // Middle finger
+            [0, 13], [13, 14], [14, 15], [15, 16],    // Ring finger
+            [0, 17], [17, 18], [18, 19], [19, 20],    // Pinky
+            [5, 9], [9, 13], [13, 17]                  // Palm connections
+        ];
+
+        function drawLandmark(x, y, color = '#00ff00', size = 5) {
+            ctx.fillStyle = color;
+            ctx.beginPath();
+            ctx.arc(x, y, size, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        function drawConnection(x1, y1, x2, y2, color = '#00ff00', width = 2) {
+            ctx.strokeStyle = color;
+            ctx.lineWidth = width;
+            ctx.beginPath();
+            ctx.moveTo(x1, y1);
+            ctx.lineTo(x2, y2);
+            ctx.stroke();
+        }
+
+        function drawHandSkeleton(landmarks, handIndex) {
+            const points = landmarks.map(lm => ({
+                x: lm.x * canvas.width,
+                y: lm.y * canvas.height
+            }));
+
+            HAND_CONNECTIONS.forEach(([i, j]) => {
+                const p1 = points[i];
+                const p2 = points[j];
+                drawConnection(p1.x, p1.y, p2.x, p2.y, '#00ffff', 3);
+            });
+
+            drawLandmark(points[0].x, points[0].y, '#ff0000', 8);
+            drawLandmark(points[4].x, points[4].y, '#ffff00', 6);
+            drawLandmark(points[8].x, points[8].y, '#ff8800', 6);
+            drawLandmark(points[12].x, points[12].y, '#ff00ff', 6);
+            drawLandmark(points[16].x, points[16].y, '#8800ff', 6);
+            drawLandmark(points[20].x, points[20].y, '#0088ff', 6);
+
+            for (let i = 1; i < 21; i++) {
+                if (i !== 4 && i !== 8 && i !== 12 && i !== 16 && i !== 20) {
+                    drawLandmark(points[i].x, points[i].y, '#00ff00', 4);
+                }
+            }
+
+            ctx.fillStyle = '#ffffff';
+            ctx.font = 'bold 18px Arial';
+            ctx.fillText(`Hand ${handIndex + 1}`, points[0].x + 20, points[0].y - 20);
+        }
+
+        // Detect hand gestures
+        function detectGesture(landmarks) {
+            const wrist = landmarks[0];
+            const thumbTip = landmarks[4];
+            const thumbIP = landmarks[3];
+            const indexTip = landmarks[8];
+            const indexBase = landmarks[5];
+            const middleTip = landmarks[12];
+            const middleBase = landmarks[9];
+            const ringTip = landmarks[16];
+            const ringBase = landmarks[13];
+            const pinkyTip = landmarks[20];
+            const pinkyBase = landmarks[17];
+
+            // Check if fingers are extended
+            const thumbExtended = thumbTip.y < thumbIP.y;
+            const indexExtended = indexTip.y < indexBase.y;
+            const middleExtended = middleTip.y < middleBase.y;
+            const ringExtended = ringTip.y < ringBase.y;
+            const pinkyExtended = pinkyTip.y < pinkyBase.y;
+
+            // Check for pinch (thumb and index close together)
+            const pinchDistance = Math.sqrt(
+                Math.pow(thumbTip.x - indexTip.x, 2) + 
+                Math.pow(thumbTip.y - indexTip.y, 2)
+            );
+
+            // Gesture detection
+            if (pinchDistance < 0.05) {
+                return 'pinch';
+            }
+
+            // Check for index finger pointing gesture (only index extended)
+            if (indexExtended && !middleExtended && !ringExtended && !pinkyExtended) {
+                return 'rotate';
+            }
+
+            const fingersExtended = [indexExtended, middleExtended, ringExtended, pinkyExtended];
+            const extendedCount = fingersExtended.filter(Boolean).length;
+
+            if (extendedCount === 0) {
+                return 'fist';
+            } else {
+                return 'partial';
+            }
+        }
+
+        // Calculate hand rotation angle
+        function calculateHandAngle(landmarks) {
+            const wrist = landmarks[0];
+            const middleTip = landmarks[12];
+            
+            // Calculate angle from wrist to middle finger tip
+            const deltaX = middleTip.x - wrist.x;
+            const deltaY = middleTip.y - wrist.y;
+            
+            return Math.atan2(deltaY, deltaX);
+        }
+
+        function updateCubeFromGestures(handLandmarks) {
+            const numHands = handLandmarks.length;
+            
+            if (numHands === 0) {
+                bothHandsPinching = false;
+                previousHandDistance = null;
+                return;
+            }
+
+            // Check if all hands are pinching
+            const allPinching = handLandmarks.every(landmarks => detectGesture(landmarks) === 'pinch');
+            
+            if (numHands === 2 && allPinching) {
+                bothHandsPinching = true;
+                
+                // Calculate distance between both hands (using wrists)
+                const hand1Wrist = handLandmarks[0][0];
+                const hand2Wrist = handLandmarks[1][0];
+                const distance = Math.sqrt(
+                    Math.pow(hand1Wrist.x - hand2Wrist.x, 2) + 
+                    Math.pow(hand1Wrist.y - hand2Wrist.y, 2)
+                );
+                
+                if (previousHandDistance !== null) {
+                    const distanceChange = distance - previousHandDistance;
+                    
+                    if (distanceChange > 0.005) {
+                        // Hands moving apart - expand
+                        targetScale = Math.min(targetScale + 0.02, 2);
+                    } else if (distanceChange < -0.005) {
+                        // Hands moving together - shrink
+                        targetScale = Math.max(targetScale - 0.02, 0.5);
+                    }
+                }
+                
+                previousHandDistance = distance;
+            } else {
+                bothHandsPinching = false;
+                previousHandDistance = null;
+                
+                // Single hand controls for rotation
+                const firstHand = handLandmarks[0];
+                const gesture = detectGesture(firstHand);
+                
+                if (gesture === 'rotate') {
+                    handRotationMode = true;
+                    
+                    // Use index finger tip for swipe tracking
+                    const currentPalm = firstHand[8]; // Index finger tip
+                    
+                    if (previousHandPosition === null) {
+                        // First frame - store position
+                        previousHandPosition = { x: currentPalm.x, y: currentPalm.y };
+                    } else {
+                        // Calculate swipe delta
+                        const deltaX = currentPalm.x - previousHandPosition.x;
+                        const deltaY = currentPalm.y - previousHandPosition.y;
+                        
+                        // Apply swipe to rotational velocity
+                        rotationVelocityY = deltaX * 4.0;  // Horizontal swipe
+                        rotationVelocityX = deltaY * 4.0;  // Vertical swipe
+                        
+                        // Update previous position
+                        previousHandPosition = { x: currentPalm.x, y: currentPalm.y };
+                    }
+                } else {
+                    handRotationMode = false;
+                    previousHandPosition = null;
+                    
+                    if (gesture === 'fist') {
+                        // Stop rotation - kill all velocity
+                        rotationVelocityX = 0;
+                        rotationVelocityY = 0;
+                        targetScale = 1;
+                    }
+                }
+            }
+        }
+
+        function onResults(results) {
+            ctx.save();
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
+
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                handInfoEl.textContent = `Hands: ${results.multiHandLandmarks.length}`;
+                
+                // Update cube based on all hand gestures
+                updateCubeFromGestures(results.multiHandLandmarks);
+                
+                results.multiHandLandmarks.forEach((landmarks, index) => {
+                    drawHandSkeleton(landmarks, index);
+                    
+                    const gesture = detectGesture(landmarks);
+                    
+                    // Display gesture
+                    ctx.fillStyle = '#ffff00';
+                    ctx.font = 'bold 20px Arial';
+                    ctx.fillText(`Hand ${index + 1}: ${gesture.toUpperCase()}`, 20, 40 + index * 30);
+                });
+                
+                // Display scaling status if both hands pinching
+                if (bothHandsPinching) {
+                    ctx.fillStyle = '#ff00ff';
+                    ctx.font = 'bold 24px Arial';
+                    ctx.fillText('SCALING MODE', 20, 40 + results.multiHandLandmarks.length * 30 + 10);
+                }
+            } else {
+                handInfoEl.textContent = 'Hands: 0';
+                bothHandsPinching = false;
+                previousHandDistance = null;
+                handRotationMode = false;
+                previousHandPosition = null;
+            }
+            
+            ctx.restore();
+        }
+
+        async function initHands() {
+            try {
+                hands = new Hands({locateFile: (file) => {
+                    return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+                }});
+
+                hands.setOptions({
+                    maxNumHands: 2,
+                    modelComplexity: 1,
+                    minDetectionConfidence: 0.5,
+                    minTrackingConfidence: 0.5
+                });
+
+                hands.onResults(onResults);
+                
+                statusEl.textContent = 'Ready';
+                startBtn.disabled = false;
+            } catch (error) {
+                console.error('Init error:', error);
+                statusEl.textContent = 'Error: ' + error.message;
+            }
+        }
+
+        async function startCamera() {
+            try {
+                videoElement = document.createElement('video');
+                videoElement.width = 640;
+                videoElement.height = 480;
+                
+                camera = new Camera(videoElement, {
+                    onFrame: async () => {
+                        if (isRunning && hands) {
+                            await hands.send({image: videoElement});
+                        }
+                    },
+                    width: 640,
+                    height: 480
+                });
+
+                await camera.start();
+                
+                isRunning = true;
+                startBtn.disabled = true;
+                stopBtn.disabled = false;
+                statusEl.textContent = 'Running';
+            } catch (error) {
+                console.error('Camera error:', error);
+                statusEl.textContent = 'Camera error: ' + error.message;
+            }
+        }
+
+        function stopCamera() {
+            isRunning = false;
+            if (camera) {
+                camera.stop();
+                camera = null;
+            }
+            if (videoElement && videoElement.srcObject) {
+                videoElement.srcObject.getTracks().forEach(track => track.stop());
+            }
+            videoElement = null;
+            
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+            statusEl.textContent = 'Stopped';
+            handInfoEl.textContent = 'Hands: 0';
+        }
+
+        window.addEventListener('load', () => {
+            console.log('Page loaded, initializing...');
+            initThreeJS();
+            
+            // Wait a moment for Three.js to initialize
+            setTimeout(() => {
+                initHands();
+            }, 500);
+        });
+    </script>
+</body>
+</html>
